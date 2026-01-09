@@ -1,0 +1,60 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Report {
+  id              String   @id @default(uuid())
+  tenantId        String   @map("tenant_id")
+  type            String
+  params          Json
+  status          String   // PENDING, RUNNING, COMPLETED, FAILED
+  attempts        Int      @default(0)
+  idempotencyKey  String?  @unique @map("idempotency_key")
+  lockedAt        DateTime? @map("locked_at")
+  lockedBy        String?  @map("locked_by")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  artifacts   ReportArtifact[]
+  executions  ReportExecution[]
+
+  @@map("reports")
+  @@index([tenantId, status])
+  @@index([status, lockedAt])
+}
+
+model ReportArtifact {
+  id          String   @id @default(uuid())
+  reportId    String   @unique @map("report_id")
+  contentType String   @map("content_type")
+  content     Bytes
+  sizeBytes   Int      @map("size_bytes")
+  checksum    String
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  report Report @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@map("report_artifacts")
+}
+
+model ReportExecution {
+  id         String    @id @default(uuid())
+  reportId   String    @map("report_id")
+  attempt    Int
+  startedAt  DateTime  @default(now()) @map("started_at")
+  finishedAt DateTime? @map("finished_at")
+  error      String?
+
+  report Report @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@map("report_executions")
+  @@index([reportId])
+}
