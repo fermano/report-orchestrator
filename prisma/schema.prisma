@@ -29,6 +29,7 @@ model Report {
   @@map("reports")
   @@index([tenantId, status])
   @@index([status, lockedAt])
+  @@index([tenantId, type, status]) // For semantic deduplication lookups
 }
 
 model ReportArtifact {

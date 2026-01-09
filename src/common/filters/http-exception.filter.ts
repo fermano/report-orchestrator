@@ -29,13 +29,24 @@ export class HttpExceptionFilter implements ExceptionFilter {
 
     const correlationId = request.correlationId || 'unknown';
 
+    // Log actual error details for non-HttpException errors (e.g., database errors)
+    const errorDetails =
+      exception instanceof HttpException
+        ? message
+        : {
+            message: (exception as any)?.message || 'Internal server error',
+            stack: (exception as any)?.stack,
+            code: (exception as any)?.code,
+            meta: (exception as any)?.meta,
+          };
+
     this.logger.error(
       {
         correlationId,
         path: request.url,
         method: request.method,
         statusCode: status,
-        error: message,
+        error: errorDetails,
       },
       'HTTP Exception',
     );

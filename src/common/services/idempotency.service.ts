@@ -10,51 +10,58 @@ export class IdempotencyService {
   /**
    * Handles idempotent report creation. This is purely infrastructure - the business
    * service knows nothing about idempotency keys.
+   * 
+   * Priority:
+   * 1. Idempotency-Key match (infrastructure concern - request deduplication)
+   * 2. Semantic match (business concern - handled by ReportsService)
+   * 3. Create new
    */
   async findOrCreateReport(
     createReportDto: CreateReportDto,
     idempotencyKey: string | undefined,
     businessCreateFn: () => Promise<ReportResponseDto>,
   ): Promise<{ result: ReportResponseDto; created: boolean }> {
-    // If no idempotency key, just use business service
-    if (!idempotencyKey) {
-      const result = await businessCreateFn();
-      return { result, created: true };
-    }
-
-    // Check for existing report with this key
-    const existing = await this.findReportByKey(idempotencyKey);
-    if (existing) {
-      return { result: existing, created: false };
-    }
-
-    // Try to create with idempotency key stored
-    try {
-      const report = await this.prisma.report.create({
-        data: {
-          tenantId: createReportDto.tenantId,
-          type: createReportDto.type,
-          params: createReportDto.params as any,
-          status: ReportStatus.PENDING,
-          idempotencyKey,
-        },
-        include: { artifacts: true },
-      });
-
-      return { result: this.mapToResponseDto(report), created: true };
-    } catch (error: any) {
-      // Handle race condition: another request created report with same key
-      if (error.code === 'P2002' && error.meta?.target?.includes('idempotency_key')) {
-        const existing = await this.findReportByKey(idempotencyKey);
-        if (existing) {
-          return { result: existing, created: false };
-        }
-        throw new ConflictException(
-          'Failed to create report: idempotency key conflict could not be resolved',
-        );
+    // Priority 1: Check for existing report with this idempotency key
+    if (idempotencyKey) {
+      const existingByKey = await this.findReportByKey(idempotencyKey);
+      if (existingByKey) {
+        return { result: existingByKey, created: false };
       }
-      throw error;
     }
+
+    // Priority 2: Use business service (which handles semantic deduplication)
+    // Business service will check for existing COMPLETED reports with same semantics
+    // and return that, or create a new one
+    const result = await businessCreateFn();
+
+    // If we have an idempotency key, try to set it on the report
+    // (whether it was found semantically or newly created)
+    if (idempotencyKey && !result.idempotencyKey) {
+      try {
+        await this.prisma.report.update({
+          where: { id: result.id },
+          data: { idempotencyKey },
+        });
+        // Re-fetch to get updated result
+        const updated = await this.findReportByKey(idempotencyKey);
+        if (updated) {
+          return { result: updated, created: result.status === 'PENDING' };
+        }
+      } catch (error: any) {
+        // Handle race condition: another request set the key
+        if (error.code === 'P2002' && error.meta?.target?.includes('idempotency_key')) {
+          const existing = await this.findReportByKey(idempotencyKey);
+          if (existing) {
+            return { result: existing, created: false };
+          }
+        }
+        // If update fails for other reasons, return the result without key
+      }
+    }
+
+    // Determine if report was created (PENDING status) or found (COMPLETED status)
+    const wasCreated = result.status === ReportStatus.PENDING;
+    return { result, created: wasCreated };
   }
 
   private async findReportByKey(idempotencyKey: string): Promise<ReportResponseDto | null> {

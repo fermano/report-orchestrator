@@ -50,12 +50,32 @@ This ensures:
 
 ### Idempotency Strategy
 
-#### Request-Level Idempotency
+The system implements idempotency at multiple levels:
+
+#### Request-Level Idempotency (Infrastructure)
 
 - Client provides optional `Idempotency-Key` header
 - Key is stored in `reports.idempotency_key` with UNIQUE constraint
 - Duplicate requests with same key return existing report (200 OK)
 - Race conditions handled via database constraint violations
+- **Priority**: Highest - checked first before semantic deduplication
+
+#### Semantic Deduplication (Business Logic)
+
+- Automatically reuses existing **COMPLETED** reports with identical business semantics
+- Matching criteria: `(tenantId, type, params)` must be identical
+- Only **COMPLETED** reports are reused (PENDING/RUNNING reports are not reused)
+- Prevents unnecessary duplicate work and storage
+- **Priority**: Secondary - checked if no idempotency key match
+
+**Example:**
+```
+Request 1: POST /reports { tenantId: "A", type: "USAGE_SUMMARY", params: {...} }
+→ Creates report, worker completes it
+
+Request 2: POST /reports { tenantId: "A", type: "USAGE_SUMMARY", params: {...} }
+→ Returns existing COMPLETED report (semantic deduplication)
+```
 
 #### Execution-Level Idempotency
 

@@ -9,8 +9,41 @@ export class ReportsService {
 
   /**
    * Creates a new report. Pure business operation.
+   * Implements semantic deduplication:
+   * - Reuses existing COMPLETED reports with the same tenant/type/params
+   * - Optionally reuses RUNNING reports (to avoid duplicate in-progress work)
+   * - Allows multiple PENDING reports (they'll naturally converge when one completes)
+   * 
+   * Priority order:
+   * 1. COMPLETED reports (reuse existing results - most important)
+   * 2. RUNNING reports (reuse in-progress work - optional optimization)
+   * 3. Create new PENDING report (if no COMPLETED/RUNNING exists)
+   * 
+   * What happens to concurrent "racers":
+   * - Multiple concurrent requests can create multiple PENDING reports
+   * - Workers process them independently
+   * - When they try to create artifacts, unique constraint on report_artifacts.report_id
+   *   ensures only one artifact is created
+   * - Workers converge duplicate attempts to COMPLETED state
+   * - Future requests will find the COMPLETED report and return it
    */
   async create(createReportDto: CreateReportDto): Promise<ReportResponseDto> {
+    // Check for existing COMPLETED report first (most important - reuse results)
+    // Also check for RUNNING to avoid duplicate in-progress work
+    const existing = await this.findExistingSemanticReport(
+      createReportDto.tenantId,
+      createReportDto.type,
+      createReportDto.params,
+    );
+
+    if (existing) {
+      // Return existing COMPLETED or RUNNING report
+      return this.mapToResponseDto(existing);
+    }
+
+    // No existing COMPLETED/RUNNING report found, create new PENDING report
+    // Multiple concurrent requests may create multiple PENDING reports - that's fine
+    // They'll converge naturally when one completes
     const report = await this.prisma.report.create({
       data: {
         tenantId: createReportDto.tenantId,
@@ -22,6 +55,46 @@ export class ReportsService {
     });
 
     return this.mapToResponseDto(report);
+  }
+
+  /**
+   * Finds an existing COMPLETED or RUNNING report with the same business semantics
+   * (tenantId, type, params). Returns the most recent COMPLETED, or oldest RUNNING if no COMPLETED exists.
+   * 
+   * Does NOT check for PENDING reports - we allow multiple PENDING reports to be created.
+   * They will converge naturally when one completes.
+   */
+  private async findExistingSemanticReport(
+    tenantId: string,
+    type: string,
+    params: any,
+  ): Promise<any | null> {
+    // Check for COMPLETED or RUNNING reports (not PENDING)
+    // Priority: COMPLETED > RUNNING
+    const report = await this.prisma.$queryRaw<any[]>`
+      SELECT * FROM reports
+      WHERE tenant_id = ${tenantId}
+        AND type = ${type}
+        AND params = ${JSON.stringify(params)}::jsonb
+        AND status IN ('COMPLETED', 'RUNNING')
+      ORDER BY 
+        CASE status 
+          WHEN 'COMPLETED' THEN 1  -- Prefer COMPLETED first
+          WHEN 'RUNNING' THEN 2    -- Then RUNNING
+        END,
+        created_at DESC  -- Prefer most recent COMPLETED, oldest RUNNING
+      LIMIT 1
+    `;
+
+    if (!report || report.length === 0) {
+      return null;
+    }
+
+    // Fetch full report with relations
+    return await this.prisma.report.findUnique({
+      where: { id: report[0].id },
+      include: { artifacts: true },
+    });
   }
 
   async findOne(id: string): Promise<ReportResponseDto> {
